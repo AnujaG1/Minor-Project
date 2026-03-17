@@ -147,7 +147,9 @@ class NetworkEnv5G(gym.Env):
         }
 
         if self.render_mode == "human":
-            return observation, reward, terminated, truncated, info
+            self.render()
+
+        return observation, reward, terminated, truncated, info
             
     def render(self):
         # print current state only when render mode = human
@@ -159,16 +161,16 @@ class NetworkEnv5G(gym.Env):
                       f"{node:<15} | "
                       f"label={label}")
                 
-        def close(self):
+    def close(self):
             pass
         
-        def get_accuracy(self):
+    def get_accuracy(self):
             total = self.total_correct + self.total_wrong
             if total == 0:
                 return 0.0
             return (self.total_correct / total) * 100
         
-        def get_stats(self):
+    def get_stats(self):
             return {
                 "Accuracy" : round(self.get_accuracy(),2),
                 "attacks_caught" : self.attacks_caught,
@@ -178,7 +180,7 @@ class NetworkEnv5G(gym.Env):
                 "total_wrong": self.total_wrong
             }
         
-        def reset_stats(self):
+    def reset_stats(self):
             # resets statistics counters (call between train/test phases)
             self.total_correct = 0
             self.total_wrong = 0
