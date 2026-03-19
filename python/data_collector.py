@@ -1,122 +1,111 @@
-# data_collector.py
-# PURPOSE: Saves all received data to CSV file
-#          This CSV is used later for RL training
-#          Run this ONCE with full simulation to collect training data
+"""
+data_collector.py
+=================
+Run this ONCE alongside an OMNeT++ simulation to collect training data.
+Saves everything to results/training_data.csv.
+
+Usage:
+  Terminal 1: python3 data_collector.py
+  Terminal 2: run OMNeT++ simulation (any config)
+
+CSV columns (updated for 7 behavioural features):
+  sim_time, node, node_type,
+  pkt_rate, pkt_size, interval, dest_port, is_attacker,
+  jitter, burst_ratio, size_std, flow_duration, cell_zscore,
+  f1, f2, f3, f4, f5, f6, f7
+"""
 
 import csv
 import os
 import time
 import sys
 
-# Always use absolute paths regardless of where script is run from
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-# ↑ /home/anuja/MinorProject/workspace/RL/python
 
-RL_DIR = os.path.dirname(SCRIPT_DIR)
-# ↑ /home/anuja/MinorProject/workspace/RL
+from feature_extractor import UDPReceiver, FeatureExtractor
 
-RESULTS_DIR = os.path.join(RL_DIR, "results")
-# ↑ /home/anuja/MinorProject/workspace/RL/results
-
-sys.path.append(RL_DIR)
-# ↑ So imports work from anywhere
-
-from python.udp_receiver import UDPReceiver
-from python.feature_extractor import FeatureExtractor
 
 def collect_training_data(
-        output_file="results/training_data.csv",
-        duration=110  
+        output_file: str = "results/training_data.csv",
+        duration:    int = 110,
+        host:        str = "127.0.0.1",
+        port:        int = 9999,
 ):
     os.makedirs("results", exist_ok=True)
 
-    #create results directory
-    os.makedirs("results", exist_ok=True)
-
-    # setup receiver and extractor
-    receiver = UDPReceiver(host="127.0.0.1", port=9999)
+    receiver  = UDPReceiver(host=host, port=port)
     extractor = FeatureExtractor()
 
-
-    with open(output_file, 'w', newline='') as csvfile:
+    with open(output_file, "w", newline="") as csvfile:
         writer = csv.writer(csvfile)
 
-        # write header
+        # Header — raw values + pre-computed behavioural values + features
         writer.writerow([
-            'sim_time',
-            'node',
-            'node_type',
-            'pkt_rate',
-            'pkt_size',
-            'interval',
-            'is_attacker',
-            'port',
-            'f1_pkt_rate',
-            'f2_pkt_size',
-            'f3_interval',
-            'f4_port',
-            'f5_time',
-            'f6_delta'
+            "sim_time", "node", "node_type",
+            # raw observed
+            "pkt_rate", "pkt_size", "interval", "dest_port", "is_attacker",
+            # behavioural (computed in C++)
+            "jitter", "burst_ratio", "size_std", "flow_duration", "cell_zscore",
+            # normalised features fed to DQN
+            "f1_pkt_rate", "f2_pkt_size", "f3_interval",
+            "f4_jitter", "f5_burst", "f6_size_unif", "f7_zscore",
         ])
 
-        print(f"Saving training data to {output_file}")
+        print(f"Saving to {output_file}")
         print("Start OMNeT++ simulation now!")
         print("-" * 50)
 
-        #start receiver
         receiver.start()
-
-        start_time = time.time()
+        start_time   = time.time()
         rows_written = 0
 
         while time.time() - start_time < duration:
-            data_batch = receiver.get_data()            # get all queued UDP packets
+            batch = receiver.get_data()
 
-            for raw in data_batch:
-                state, label, node = extractor.extract(raw)    # Get all queued data
+            for raw in batch:
+                features, label, node = extractor.extract(raw)
 
-                # write to CSV
                 writer.writerow([
-                    raw.get('time', 0),
-                    raw.get('node', ''),
-                    raw.get('type', ''),
-                    raw.get('pkt_rate', 0),
-                    raw.get('pkt_size', 0),
-                    raw.get('interval', 0),
+                    raw.get("time",          0),
+                    raw.get("node",          ""),
+                    raw.get("type",          ""),
+                    # raw observed
+                    raw.get("pkt_rate",      0),
+                    raw.get("pkt_size",      0),
+                    raw.get("interval",      0),
+                    raw.get("dest_port",     0),
                     label,
-                    raw.get('port', 0),
-                    state[0],  # f1
-                    state[1],  # f2
-                    state[2],  # f3
-                    state[3],  # f4
-                    state[4],  # f5
-                    state[5]   # f6
+                    # behavioural
+                    raw.get("jitter",        0),
+                    raw.get("burst_ratio",   1),
+                    raw.get("size_std",      0),
+                    raw.get("flow_duration", 0),
+                    raw.get("cell_zscore",   0),
+                    # 7 normalised features
+                    features[0], features[1], features[2],
+                    features[3], features[4], features[5], features[6],
                 ])
                 rows_written += 1
 
-                #print progress
-                if raw.get('pkt_rate', 0) > 100:
+                if raw.get("pkt_rate", 0) > 100:
                     print(f"t={raw['time']:.2f}s | "
                           f"{raw['node']:<15} | "
-                          f"ATTACK! rate={raw['pkt_rate']:.0f}")
-                    
+                          f"ATTACK rate={raw['pkt_rate']:.0f} "
+                          f"jitter={raw.get('jitter',0):.4f} "
+                          f"burst={raw.get('burst_ratio',1):.2f}")
+
             csvfile.flush()
-            # ↑ Write to disk regularly
-
             time.sleep(0.01)
-            # ↑ Check every 10ms
 
-            # Check if simulation ended
             if receiver.get_stats()["sim_ended"]:
-                print("Simulation ended - stopping collection")
+                print("Simulation ended — stopping collection")
                 break
 
         receiver.stop()
-    print(f"\nData collection complete!")
-    print(f"Rows saved: {rows_written}")
-    print(f"File: {output_file}")
+
+    print(f"\nDone. Rows saved: {rows_written} → {output_file}")
     return output_file
+
 
 if __name__ == "__main__":
     collect_training_data()
-        

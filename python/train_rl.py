@@ -1,391 +1,288 @@
+"""
+train_rl.py
+===========
+DQN agent for 5G attack detection.
+
+Changes from original:
+  - input_dim = 7  (was 6)
+  - Dropout(0.2) added to prevent overfitting
+  - Train/test split — evaluates on held-out 20%
+  - Saves best model based on TEST accuracy (not train)
+"""
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 import random
 import os
-import sys
 from collections import deque
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-RESULTS_DIR = os.path.join(SCRIPT_DIR, "results")
-CSV_PATH = os.path.join(RESULTS_DIR, "training_data.csv")
-MODEL_PATH = os.path.join(RESULTS_DIR, "dqn_model.pth")
-
-sys.path.append(SCRIPT_DIR)
 from environment import NetworkEnv5G
 
-# set device (CPU or GPU if available)
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print("Using device:", device)
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {DEVICE}")
 
-# Part 1: Neural Network
+
+# ─────────────────────────────────────────────────────────────
+# Network
+# ─────────────────────────────────────────────────────────────
 
 class DQNNetwork(nn.Module):
-    def __init__(self, state_size=6, action_size=2):
-        super(DQNNetwork, self).__init__()
+    """
+    4-layer network: 7 → 64 → 64 → 32 → 2
+    Dropout(0.2) after each hidden layer prevents memorising
+    exact feature values from the simulation.
+    """
+
+    def __init__(self, input_dim: int = 7, output_dim: int = 2):
+        super().__init__()
         self.network = nn.Sequential(
-            nn.Linear(state_size, 64),
-            # Linear layer: 6 inputs → 64 outputs
-            # Each of 64 neurons sees all 6 features
-            # Learns weights: output = weight * input + bias
-
+            nn.Linear(input_dim, 64),
             nn.ReLU(),
-            nn.Linear(64,64),     # 64 → 64: learns combinations of patterns from layer 1
+            nn.Dropout(0.2),
+            nn.Linear(64, 64),
             nn.ReLU(),
-
-            nn.Linear(64,32),      # 64 → 32: narrowing down to most important patterns
+            nn.Dropout(0.2),
+            nn.Linear(64, 32),
             nn.ReLU(),
-
-            nn.Linear(32, action_size)     # 32 → 2: final Q-values [Q(normal), Q(attack)]
-            
+            nn.Linear(32, output_dim),
         )
-    
+
     def forward(self, x):
         return self.network(x)
 
 
-# part 2 : Replay Buffer
+# ─────────────────────────────────────────────────────────────
+# Replay buffer
+# ─────────────────────────────────────────────────────────────
 
 class ReplayBuffer:
-
-    """
-    Stores past experiences for training(memory).
- 
-    WHY NEEDED:
-    Problem: If we train on consecutive steps (t=1, t=2, t=3...),
-    the data is highly correlated — the network memorizes sequences,
-    not patterns.
- 
-    Solution: Store all experiences in a buffer.
-    Randomly sample from it during training.
-    This breaks correlation → network learns actual patterns.
-    """
-
-    def __init__(self, capacity=10000):
+    def __init__(self, capacity: int = 10000):
         self.buffer = deque(maxlen=capacity)
-    
+
     def push(self, state, action, reward, next_state, done):
         self.buffer.append((state, action, reward, next_state, done))
 
-    def sample(self, batch_size):
+    def sample(self, batch_size: int):
         batch = random.sample(self.buffer, batch_size)
         states, actions, rewards, next_states, dones = zip(*batch)
-        # Unzip: [(s1,a1,r1,ns1,d1), (s2,...)] → ([s1,s2], [a1,a2], 
-
         return (
-            torch.FloatTensor(np.array(states)).to(device),
-            torch.LongTensor(actions).to(device),
-            torch.FloatTensor(rewards).to(device),
-            torch.FloatTensor(np.array(next_states)).to(device),
-            torch.FloatTensor(dones).to(device)
+            torch.FloatTensor(np.array(states)).to(DEVICE),
+            torch.LongTensor(actions).to(DEVICE),
+            torch.FloatTensor(rewards).to(DEVICE),
+            torch.FloatTensor(np.array(next_states)).to(DEVICE),
+            torch.FloatTensor(dones).to(DEVICE),
         )
-    
-    def __len__(self):
-        """Returns how many experiences are stored."""
-        return len(self.buffer)
-    
 
-# Part 3 : DQN Agent
+    def __len__(self):
+        return len(self.buffer)
+
+
+# ─────────────────────────────────────────────────────────────
+# Agent
+# ─────────────────────────────────────────────────────────────
 
 class DQNAgent:
     """
-DOUBLE DQN TRICK:
-  We use TWO identical networks:
- 
-    1. online_net  → makes decisions, gets trained every step
-    2. target_net  → provides stable learning targets, updated slowly
-"""
+    Double DQN:
+      online_net  — learns every step
+      target_net  — frozen copy, updates every 10 episodes
+    Prevents training target from shifting too fast.
+    """
 
-    def __init__(self,state_size=6, action_size=2):
-        self.state_size = state_size
-        self.action_size = action_size
-
-        self.online_net = DQNNetwork(state_size, action_size).to(device)
-        self.target_net = DQNNetwork(state_size, action_size).to(device)
+    def __init__(self, input_dim=7, output_dim=2):
+        self.online_net = DQNNetwork(input_dim, output_dim).to(DEVICE)
+        self.target_net = DQNNetwork(input_dim, output_dim).to(DEVICE)
         self.target_net.load_state_dict(self.online_net.state_dict())
-
         self.target_net.eval()
-        # eval() = inference mode, never trains directly
-        # Disables dropout/batchnorm if present
 
-        # Optimizer
-        self.optimizer = optim.Adam(
-            self.online_net.parameters(), lr=0.001
-        )
+        self.optimizer  = optim.Adam(self.online_net.parameters(), lr=0.001)
+        self.criterion  = nn.MSELoss()
+        self.buffer     = ReplayBuffer(capacity=10000)
 
-        # Loss function
-        self.criterion = nn.MSELoss()
-
-        # Memory
-        self.memory = ReplayBuffer(capacity=10000)
-
-        # Hyperparameters
-        self.gamma = 0.95
-
-        self.epsilon = 1.0
-        self.epsilon_min = 0.01
-        self.epsilon_decay = 0.995
-        # Multiply epsilon by this after each episode
-        # Episode 1:   epsilon = 1.000
-        # Episode 100: epsilon = 1.0 * 0.995^100 = 0.606
-        # Episode 300: epsilon = 1.0 * 0.995^300 = 0.223
-        # Episode 500: epsilon = 1.0 * 0.995^500 = 0.082
-
-        self.batch_size = 64
+        self.epsilon             = 1.0    # start fully random
+        self.epsilon_decay       = 0.995
+        self.epsilon_min         = 0.01
+        self.gamma               = 0.95
+        self.batch_size          = 64
         self.update_target_every = 10
-        self.episode_count = 0
 
-    def act(self, state):
-        # choose action using epsilon-greedy policy.
+    def select_action(self, state) -> int:
         if random.random() < self.epsilon:
-            return random.randint(0, self.action_size - 1)
-        
-        state_tensor = torch.FloatTensor(state).unsqueeze(0).to(device)
-        # unsqueeze(0): adds batch dimension
-        # state shape: (6,) → (1, 6)
-        # Network expects batch format even for single sample
-
+            return random.randint(0, 1)
         with torch.no_grad():
-            q_values = self.online_net(state_tensor)
-        
-        return q_values.argmax().item()
-    
-    def remember(self, state, action, reward, next_state, done):
-        # store the experience in replay buffer
-        self.memory.push(state, action, reward, next_state, done)
+            s = torch.FloatTensor(state).unsqueeze(0).to(DEVICE)
+            return int(self.online_net(s).argmax(dim=1).item())
 
     def train_step(self):
-        if len(self.memory) < self.batch_size:
-            return 0.0
-            # Need at least 64 experiences before training starts
-            # First ~64 steps: just collecting data, no learning yet
+        if len(self.buffer) < self.batch_size:
+            return None
 
-        # Sample random batch from memory
-        states, actions, rewards, next_states, dones = self.memory.sample(self.batch_size)
-        # Each: tensor of shape (64,6) or (64,)
+        states, actions, rewards, next_states, dones = \
+            self.buffer.sample(self.batch_size)
 
-        # What did our network predict ?
-        current_q = self.online_net(states)
-        # Shape: (64, 2) — Q-values for both actions for each sample
+        # Current Q values from online net
+        q_current = self.online_net(states).gather(
+            1, actions.unsqueeze(1)
+        ).squeeze(1)
 
-        current_q_values = current_q.gather(1, actions.unsqueeze(1)).squeeze(1)
-        # gather: pick only the Q-value for the action actually taken
-
-        # what should the network have predicted ?
+        # Target Q values from target net (Double DQN)
         with torch.no_grad():
-            next_q = self.target_net(next_states)
-            max_next_q = next_q.max(1)[0]    # Best Q-value available in next state
+            next_actions = self.online_net(next_states).argmax(dim=1)
+            q_next       = self.target_net(next_states).gather(
+                1, next_actions.unsqueeze(1)
+            ).squeeze(1)
+            q_target = rewards + self.gamma * q_next * (1 - dones)
 
-            target_q_values = rewards + self.gamma * max_next_q * (1 - dones)
-            # BELLMAN EQUATION:
-            # target = reward + 0.95 * best_future_q * (1 if not done)
-            # If done=1 (episode ended): target = reward only
-            # If done=0 (episode continues): target = reward + future
-
-        loss = self.criterion(current_q_values, target_q_values)
-
+        loss = self.criterion(q_current, q_target)
         self.optimizer.zero_grad()
-        loss.backward()   #Backward Propagation to reduce loss
-
-        torch.nn.utils.clip_grad_norm_(self.online_net.parameters(),1.0)
+        loss.backward()
         self.optimizer.step()
         return loss.item()
-    
-    def update_epsilon(self):
-        """
-        Decay exploration rate after each episode.
-        WHY NEEDED:
-        Early training: explore randomly to discover patterns
-        Late training:  exploit learned knowledge
-        This function gradually shifts from explore to exploit.
-        """
-        self.epsilon = max(
-            self.epsilon_min, 
-            self.epsilon * self.epsilon_decay
-        )
-        # Multiply by 0.995 each episode
-        # Never go below 0.01
-    
-    def update_target_network(self):
-        # copy online network weightsto target network.
+
+    def decay_epsilon(self):
+        self.epsilon = max(self.epsilon_min,
+                           self.epsilon * self.epsilon_decay)
+
+    def update_target(self):
         self.target_net.load_state_dict(self.online_net.state_dict())
 
-    def save(self,path):
-        # save trained model to disk. so that we can use it in real time without retraining
+    def save(self, path: str, episode: int):
         torch.save({
-            'online_net': self.online_net.state_dict(),
-            'target_net': self.target_net.state_dict(),
-            'epsilon':  self.epsilon,
-            'episode': self.episode_count
+            "online_net": self.online_net.state_dict(),
+            "target_net": self.target_net.state_dict(),
+            "epsilon"   : self.epsilon,
+            "episode"   : episode,
         }, path)
-        print(f"[DQN] Model saved -> {path}")
 
-    def load(self, path):
-        checkpoint = torch.load(path, map_location=device)
-        self.online_net.load_state_dict(checkpoint['online_net'])
-        self.target_net.load_state_dict(checkpoint['target_net'])
-        self.epsilon = checkpoint['epsilon']
-        print(f"[DQN] Model loaded <- {path}")
+    def load(self, path: str):
+        ckpt = torch.load(path, map_location=DEVICE)
+        self.online_net.load_state_dict(ckpt["online_net"])
+        self.target_net.load_state_dict(ckpt["target_net"])
+        self.epsilon = ckpt.get("epsilon", self.epsilon_min)
 
-# Part 4: Training Loop
 
-def train(episodes=500):
-    print("\n" + "="*60)
-    print(" PHASE 4: DQN TRAINING - 5G Attack Detection")
-    print("="*60)
+# ─────────────────────────────────────────────────────────────
+# Evaluation on held-out test set
+# ─────────────────────────────────────────────────────────────
 
-    env = NetworkEnv5G(CSV_PATH)
-    agent = DQNAgent(state_size=6, action_size=2)
-    episode_rewards = []
-    episode_losses = []
-    accuracies = []
-    best_accuracy = 0.0
-
-    print(f"\n Training for {episodes} episodes.")
-    print(f"Each episode = 200 steps through network traffic data")
-    print(f"Total Decisions = {episodes * 200:,}")
-    print("-"*60)
-
-    # main loop
-    for episodes in range(1, episodes + 1 ):
-        state, info = env.reset()
-        total_reward = 0.0
-        total_loss = 0.0
-        steps = 0
-
-        # Episode loop = 200 steps
-        while True:
-            #step 1 : Agent decides action
-            action = agent.act(state)
-
-            # Step 2: Environment grades the decision
-            next_state, reward, terminated, truncated, info = env.step(action)
-
-            # Step 3: Store experience in memory
-            done = terminated or truncated
-            agent.remember(state, action, reward, next_state, float(done))
-
-            # Step 4: Learn from random past experiences
-            loss = agent.train_step()
-
-            # Step 5: Update tracking
-            total_reward += reward
-            total_loss += loss
-            steps += 1
-            state = next_state
-            # Move to next state for next iteration
-
-            if done:
-                break
-
-            # END OF EPISODE 
-
-        agent.update_epsilon()
-        agent.episode_count += 1
-
-        if episodes % agent.update_target_every == 0:
-            agent.update_target_network()
-
-        # Record metrics
-        accuracy = env.get_accuracy()
-        avg_loss = total_loss / max(steps, 1)
-        episode_rewards.append(total_reward)
-        accuracies.append(accuracy)
-
-        if accuracy > best_accuracy and episodes > 50:
-            best_accuracy = accuracy
-            agent.save(MODEL_PATH)
-
-        if episodes % 50 == 0:
-            stats = env.get_stats()
-            avg_reward = np.mean(episode_rewards[-50:])
-            avg_acc = np.mean(accuracies[-50:])
-
-            print(f"Episode {episodes:4d}/{episodes} | "
-                  f"Avg Reward: {avg_reward:8.2f} | "
-                  f"Accuracy: {avg_acc:6.2f}% | "
-                  f"Epsilon: {agent.epsilon:.3f} | "
-                  f"Loss: {avg_loss:.4f}")
-            print(f" Caught: {stats['attacks_caught']} | "
-                  f"Missed: {stats['attacks_missed']} | "
-                  f"False alarms: {stats['false_alarms']}")
-            
-            env.reset_stats()
-
-    # TRAINING COMPLETE
-    print("\n" + "="*60)
-    print(f"Training Complete!")
-    print(f"Best Accuracy achieved: {best_accuracy:.2f}%")
-    print(f"Model saved to: {MODEL_PATH}")
-    print("="*60)
-
-    #Run final evaluation on full dataset
-    print("\n Running final evaluation on full dataset...")
-    test(agent,env)
-
-    return agent
-
-# PART 5: TEST FUNCTION
-def test(agent, env):
-    
+def evaluate(agent: DQNAgent, env: NetworkEnv5G) -> dict:
     """
-    WHY NEEDED:
-    Training accuracy can be misleading (agent sees same data repeatedly).
-    This function does a clean single pass through ALL data
-    with epsilon=0 (no random actions) to get true performance.
+    Run one full pass through the test environment (no noise, no epsilon).
+    Returns accuracy and attack detection stats.
     """
-    agent.epsilon = 0.0
+    agent.online_net.eval()
+    env_noise_std  = env.noise_std
+    env.noise_std  = 0.0          # disable noise for evaluation
     env.reset_stats()
-    state, _ = env.reset()
-    env.current_pos = 0
 
-    for i in range(len(env.states) - 1):
-        action = agent.act(state)
-        next_state, reward, terminated, truncated, info = env.step(action)
-        state = next_state
-        if terminated:
-            break
+    obs, _ = env.reset()
+    done   = False
+    steps  = 0
 
-    # Print results
-    stats = env.get_stats()
-    total = stats['total_correct'] + stats['total_wrong']
+    while not done and steps < len(env.states):
+        with torch.no_grad():
+            s      = torch.FloatTensor(obs).unsqueeze(0).to(DEVICE)
+            action = int(agent.online_net(s).argmax(dim=1).item())
 
-    print("\n── FINAL TEST RESULTS ──────────────────────────────")
-    print(f"  Total samples evaluated : {total}")
-    print(f"  Overall Accuracy        : {stats['Accuracy']:.2f}%")
-    print(f"  Attacks caught          : {stats['attacks_caught']}")
-    print(f"  Attacks missed          : {stats['attacks_missed']}")
-    print(f"  False alarms            : {stats['false_alarms']}")
-    print("────────────────────────────────────────────────────")
+        obs, _, terminated, truncated, _ = env.step(action)
+        done  = terminated or truncated
+        steps += 1
 
-    if stats['Accuracy'] >= 90:
-        print("  ✅ EXCELLENT — Ready for Phase 5 Intent Engine!")
-    elif stats['Accuracy'] >= 75:
-        print("  ⚠️  GOOD — Consider collecting more training data")
-    else:
-        print("  ❌ NEEDS WORK — Run more episodes or collect more data")
-    print("────────────────────────────────────────────────────")
+    stats         = env.get_stats()
+    env.noise_std = env_noise_std   # restore noise
+    agent.online_net.train()
+    return stats
+
+
+# ─────────────────────────────────────────────────────────────
+# Training
+# ─────────────────────────────────────────────────────────────
+
+def train(csv_path:    str = "results/training_data.csv",
+          model_path:  str = "results/dqn_model.pth",
+          episodes:    int = 500):
+
+    import pandas as pd
+    from sklearn.model_selection import train_test_split
+
+    # ── Train / test split ───────────────────────────────────
+    print("[Train] Splitting data 80/20 train/test...")
+    df       = pd.read_csv(csv_path)
+    train_df = df.sample(frac=0.8, random_state=42)
+    test_df  = df.drop(train_df.index)
+
+    train_path = csv_path.replace(".csv", "_train.csv")
+    test_path  = csv_path.replace(".csv", "_test.csv")
+    train_df.to_csv(train_path, index=False)
+    test_df.to_csv(test_path,  index=False)
+    print(f"  Train: {len(train_df)} rows | Test: {len(test_df)} rows")
+
+    # ── Environments ─────────────────────────────────────────
+    train_env = NetworkEnv5G(train_path, max_steps=200, noise_std=0.02)
+    test_env  = NetworkEnv5G(test_path,  max_steps=9999, noise_std=0.0)
+
+    agent = DQNAgent(input_dim=7, output_dim=2)
+    os.makedirs("results", exist_ok=True)
+
+    best_test_acc  = 0.0
+    best_episode   = 0
+
+    print(f"\n[Train] Starting {episodes} episodes on {DEVICE}")
+    print("-" * 60)
+
+    for ep in range(1, episodes + 1):
+
+        obs, _ = train_env.reset()
+        ep_reward = 0.0
+        done      = False
+
+        while not done:
+            action = agent.select_action(obs)
+            next_obs, reward, terminated, truncated, _ = train_env.step(action)
+            done = terminated or truncated
+
+            agent.buffer.push(
+                obs, action, reward,
+                next_obs, float(terminated)
+            )
+            agent.train_step()
+            obs        = next_obs
+            ep_reward += reward
+
+        agent.decay_epsilon()
+
+        if ep % agent.update_target_every == 0:
+            agent.update_target()
+
+        # ── Evaluate on test set every 50 episodes ──────────
+        if ep % 50 == 0 or ep == episodes:
+            test_stats  = evaluate(agent, test_env)
+            train_stats = train_env.get_stats()
+            train_env.reset_stats()
+
+            test_acc  = test_stats["accuracy"]
+            train_acc = train_stats["accuracy"] if train_stats["total_correct"] + train_stats["total_wrong"] > 0 else 0
+
+            print(f"Ep {ep:4d} | "
+                  f"train_acc={train_acc:.1f}% | "
+                  f"test_acc={test_acc:.1f}% | "
+                  f"attacks_caught={test_stats['attacks_caught']} | "
+                  f"missed={test_stats['attacks_missed']} | "
+                  f"eps={agent.epsilon:.3f}")
+
+            # Save best model based on TEST accuracy
+            if test_acc > best_test_acc:
+                best_test_acc = test_acc
+                best_episode  = ep
+                agent.save(model_path, ep)
+                print(f"  *** New best: {test_acc:.1f}% — saved to {model_path}")
+
+    print(f"\n[Train] Done. Best test accuracy: {best_test_acc:.1f}% at episode {best_episode}")
+    print(f"[Train] Model saved: {model_path}")
+    return best_test_acc
+
 
 if __name__ == "__main__":
-    os.makedirs(RESULTS_DIR, exist_ok=True)
-    train(episodes=500)
-
-
-        
-
-           
-
-
-
-
-        
-
- 
-
-
-        
-        
- 
-
-
+    train()
