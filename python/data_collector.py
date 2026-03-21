@@ -1,33 +1,14 @@
-"""
-data_collector.py
-=================
-Run this ONCE alongside an OMNeT++ simulation to collect training data.
-Saves everything to results/training_data.csv.
-
-Usage:
-  Terminal 1: python3 data_collector.py
-  Terminal 2: run OMNeT++ simulation (any config)
-
-CSV columns (updated for 7 behavioural features):
-  sim_time, node, node_type,
-  pkt_rate, pkt_size, interval, dest_port, is_attacker,
-  jitter, burst_ratio, size_std, flow_duration, cell_zscore,
-  f1, f2, f3, f4, f5, f6, f7
-"""
-
 import csv
 import os
-import time
+import time, argparse
 import sys
-
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 from feature_extractor import UDPReceiver, FeatureExtractor
 
 
 def collect_training_data(
         output_file: str = "results/training_data.csv",
-        duration:    int = 110,
+        duration:    int = 600,
         host:        str = "127.0.0.1",
         port:        int = 9999,
 ):
@@ -42,13 +23,10 @@ def collect_training_data(
         # Header — raw values + pre-computed behavioural values + features
         writer.writerow([
             "sim_time", "node", "node_type",
-            # raw observed
-            "pkt_rate", "pkt_size", "interval", "dest_port", "is_attacker",
-            # behavioural (computed in C++)
-            "jitter", "burst_ratio", "size_std", "flow_duration", "cell_zscore",
-            # normalised features fed to DQN
+            "pkt_rate", "pkt_size", "interval", "dest_port",
+            "burst_ratio", "cell_zscore", "is_attacker",
             "f1_pkt_rate", "f2_pkt_size", "f3_interval",
-            "f4_jitter", "f5_burst", "f6_size_unif", "f7_zscore",
+            "f4_burst", "f5_zscore",
         ])
 
         print(f"Saving to {output_file}")
@@ -56,56 +34,67 @@ def collect_training_data(
         print("-" * 50)
 
         receiver.start()
-        start_time   = time.time()
+        start  = time.time()
         rows_written = 0
+        sim_ended = False
 
-        while time.time() - start_time < duration:
+        while True:
+            if time.time() - start > duration:
+                print("[Collector] Timeout reached")
+                break
+            
             batch = receiver.get_data()
-
             for raw in batch:
+                if raw.get("pkt_rate", 0) == 0:
+                    continue 
                 features, label, node = extractor.extract(raw)
 
                 writer.writerow([
                     raw.get("time",          0),
                     raw.get("node",          ""),
                     raw.get("type",          ""),
-                    # raw observed
                     raw.get("pkt_rate",      0),
                     raw.get("pkt_size",      0),
                     raw.get("interval",      0),
                     raw.get("dest_port",     0),
-                    label,
-                    # behavioural
-                    raw.get("jitter",        0),
                     raw.get("burst_ratio",   1),
-                    raw.get("size_std",      0),
-                    raw.get("flow_duration", 0),
                     raw.get("cell_zscore",   0),
-                    # 7 normalised features
+                    label,
                     features[0], features[1], features[2],
-                    features[3], features[4], features[5], features[6],
+                    features[3], features[4],
                 ])
                 rows_written += 1
 
                 if raw.get("pkt_rate", 0) > 100:
                     print(f"t={raw['time']:.2f}s | "
                           f"{raw['node']:<15} | "
-                          f"ATTACK rate={raw['pkt_rate']:.0f} "
-                          f"jitter={raw.get('jitter',0):.4f} "
+                          f"PACKET rate={raw['pkt_rate']:.0f} "
                           f"burst={raw.get('burst_ratio',1):.2f}")
 
             csvfile.flush()
-            time.sleep(0.01)
 
-            if receiver.get_stats()["sim_ended"]:
-                print("Simulation ended — stopping collection")
+            if receiver.get_stats()["sim_ended"] and not sim_ended:
+                sim_ended = True
+                print("[Collector] SIM_END — draining queue...")
+                time.sleep(1.0)
+ 
+            if sim_ended and not batch:
+                print("[Collector] Done")
                 break
+            time.sleep(0.005)
 
         receiver.stop()
+        s = receiver.get_stats()
+        print(f"\nReceived : {s['packets_received']}")
+        print(f"Dropped  : {s['packets_dropped']}")
+        print(f"Rows     : {rows_written} → {output_file}")
 
-    print(f"\nDone. Rows saved: {rows_written} → {output_file}")
     return output_file
 
 
 if __name__ == "__main__":
-    collect_training_data()
+    p = argparse.ArgumentParser()
+    p.add_argument("--output",   default="results/training_data.csv")
+    p.add_argument("--duration", type=int, default=600)
+    args = p.parse_args()
+    collect_training_data(output_file=args.output, duration=args.duration)

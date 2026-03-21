@@ -1,8 +1,4 @@
 """
-realtime_pipeline.py
-====================
-Live pipeline: OMNeT++ UDP → FeatureExtractor → DQN → IntentEngine → PipelineState
-
 Two threads:
   Thread 1 (UDPListenerThread) — receives packets from SocketStreamer → raw_queue
   Thread 2 (_process_loop)     — drains queue, runs inference, updates state
@@ -10,10 +6,7 @@ Two threads:
 PipelineState is thread-safe shared memory that Flask reads every 500ms.
 """
 
-import json
-import time
-import torch
-import threading
+import json, time, torch, threading, traceback
 import numpy as np
 from collections import deque
 
@@ -21,19 +14,13 @@ from feature_extractor import FeatureExtractor, UDPReceiver
 from train_rl import DQNNetwork
 from intent_engine import IntentEngine, Intent
 
-
-# ─────────────────────────────────────────────────────────────
-# DQN inference wrapper
-# ─────────────────────────────────────────────────────────────
-
 class DQNInference:
     """Loads saved model, greedy inference only — no training."""
 
-    def __init__(self, model_path="results/dqn_model.pth",
-                 input_dim=7, output_dim=2):
-        self.net = DQNNetwork(input_dim, output_dim)
-
+    def __init__(self, model_path="results/dqn_model.pth", input_dim=5):
+        self.net = DQNNetwork(input_dim)
         checkpoint = torch.load(model_path, map_location="cpu")
+
         # Model saved by DQNAgent.save() as full checkpoint dict
         if "online_net" in checkpoint:
             self.net.load_state_dict(checkpoint["online_net"])
@@ -43,18 +30,13 @@ class DQNInference:
         self.net.eval()
         print(f"[DQN] Loaded from {model_path}")
 
-    def predict(self, features) -> int:
+    def predict(self, features):
         with torch.no_grad():
             x = torch.FloatTensor(features).unsqueeze(0)
             return int(self.net(x).argmax(dim=1).item())
 
-
-# ─────────────────────────────────────────────────────────────
-# UDP listener thread
-# ─────────────────────────────────────────────────────────────
-
 class UDPListenerThread(threading.Thread):
-    """Wraps UDPReceiver, pushes packets onto shared deque."""
+    """Wraps UDP packets => pushes packets onto shared deque."""
 
     def __init__(self, raw_queue: deque, host="127.0.0.1", port=9999):
         super().__init__(daemon=True)
@@ -74,16 +56,8 @@ class UDPListenerThread(threading.Thread):
         self._stop_evt.set()
         self.receiver.stop()
 
-
-# ─────────────────────────────────────────────────────────────
-# Shared pipeline state (Flask reads this)
-# ─────────────────────────────────────────────────────────────
-
 class PipelineState:
-    """
-    Thread-safe store between processing thread and Flask.
-    Uses threading.Lock so reads and writes never overlap.
-    """
+ # Thread-safe shared state between pipeline and Flask.
 
     def __init__(self):
         self._lock           = threading.Lock()
@@ -120,7 +94,7 @@ class PipelineState:
         with self._lock:
             self.sim_running = False
 
-    def snapshot(self) -> dict:
+    def snapshot(self):
         with self._lock:
             return {
                 "counters"       : dict(self.counters),
@@ -141,27 +115,13 @@ class PipelineState:
             self.counters = {"total": 0, "attacks": 0, "normal": 0}
             self.sim_running = False
 
-
-# ─────────────────────────────────────────────────────────────
-# Main pipeline
-# ─────────────────────────────────────────────────────────────
-
 class RealtimePipeline:
-    """
-    Full live chain:
-      SocketStreamer (C++) → UDP:9999
-        → UDPListenerThread → raw_queue
-          → _process_loop
-              → FeatureExtractor.extract() → (features[7], ground_truth, node)
-              → DQNInference.predict(features) → action (0/1)
-              → IntentEngine.process()         → Intent
-              → PipelineState.update()         → Flask reads
-    """
-
+ # Wires everything together: UDP → FeatureExtractor → DQN → IntentEngine → PipelineState
+    
     def __init__(self, model_path="results/dqn_model.pth"):
         self.raw_queue = deque(maxlen=500)
         self.extractor = FeatureExtractor()
-        self.dqn       = DQNInference(model_path, input_dim=7)
+        self.dqn       = DQNInference(model_path, input_dim=5)
         self.engine    = IntentEngine()
         self.state     = PipelineState()
         self._listener = UDPListenerThread(self.raw_queue)
@@ -171,9 +131,7 @@ class RealtimePipeline:
     def start(self):
         self._listener.start()
         self._running = True
-        self._thread  = threading.Thread(
-            target=self._process_loop, daemon=True
-        )
+        self._thread  = threading.Thread(target=self._process_loop, daemon=True)
         self._thread.start()
         print("[Pipeline] Started — waiting for OMNeT++ simulation...")
 
@@ -196,8 +154,8 @@ class RealtimePipeline:
                 continue
 
             try:
-                # Step 1: extract 7 behavioural features
-                features, ground_truth, node = self.extractor.extract(raw)
+                # Step 1: extract 5 behavioural features
+                features, _, node = self.extractor.extract(raw)
 
                 # Step 2: DQN predicts independently from ground truth
                 action = self.dqn.predict(features)
@@ -213,50 +171,34 @@ class RealtimePipeline:
 
                 # Step 4: update Flask-readable state
                 self.state.update(intent, raw)
-
                 if action == 1:
                     print(intent)
 
             except Exception as e:
                 print(f"[Pipeline] Error: {e}")
-                import traceback; traceback.print_exc()
-
-
-# ─────────────────────────────────────────────────────────────
-# Standalone test — sends fake packets to itself
-# ─────────────────────────────────────────────────────────────
+                traceback.print_exc()
 
 if __name__ == "__main__":
     import socket as _socket
 
     pipeline = RealtimePipeline()
     pipeline.start()
-
     sock = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+    print("[Test] Sending fake packets...")
 
-    def send(pkt):
-        sock.sendto(json.dumps(pkt).encode(), ("127.0.0.1", 9999))
-
-    print("[Test] Sending fake OMNeT++ packets...\n")
     for i in range(20):
         t = round(5.0 + i * 0.2, 2)
-        if i % 3 == 0:
-            send({"time":t,"node":"attacker[0]","type":"attacker",
-                  "pkt_rate":1000,"pkt_size":1500,"interval":0.001,
-                  "is_attacker":1,"dest_port":4000,
-                  "jitter":0.0,"burst_ratio":8.5,
-                  "size_std":0.0,"flow_duration":0.3,"cell_zscore":4.8})
-        else:
-            send({"time":t,"node":f"ue[{i%3}]","type":"ue",
-                  "pkt_rate":10,"pkt_size":512,"interval":0.098,
-                  "is_attacker":0,"dest_port":5000,
-                  "jitter":0.012,"burst_ratio":1.1,
-                  "size_std":45.0,"flow_duration":t,"cell_zscore":0.2})
+        pkt = {"time": t, "node": "attacker[0]" if i % 3 == 0 else f"ue[{i%3}]",
+               "pkt_rate": 1000.0 if i % 3 == 0 else 10.0,
+               "pkt_size": 1500 if i % 3 == 0 else 512,
+               "interval": 0.001 if i % 3 == 0 else 0.1,
+               "burst_ratio": 8.5 if i % 3 == 0 else 1.1,
+               "cell_zscore": 4.8 if i % 3 == 0 else 0.2}
+        sock.sendto(json.dumps(pkt).encode(), ("127.0.0.1", 9999))
         time.sleep(0.05)
-
     time.sleep(0.5)
     snap = pipeline.state.snapshot()
-    print(f"\nCounters : {snap['counters']}")
-    print(f"Alerts   : {len(snap['alert_log'])}")
-    print(f"Nodes    : {list(snap['node_timeseries'].keys())}")
+    print(f"Counters: {snap['counters']}")
+    print(f"Nodes:    {list(snap['node_timeseries'].keys())}")
     pipeline.stop()
+ 
