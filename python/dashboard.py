@@ -1,5 +1,10 @@
-# Live visualization of OMNeT++ simulation.
+"""
+dashboard.py
+Flask dashboard — live visualization of OMNeT++ simulation.
 
+Run:  python3 dashboard.py
+Open: http://localhost:5000
+"""
 from flask import Flask, jsonify, render_template_string
 from realtime_pipeline import RealtimePipeline
 
