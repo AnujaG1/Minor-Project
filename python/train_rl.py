@@ -208,8 +208,9 @@ def train(
 
     print(f"\nTraining DDQN for {episodes} episodes...\n")
     print(f"{'Ep':>5} | {'DetRate':>8} | {'FAlarm':>7} | "
-          f"{'Caught':>7} | {'Missed':>7} | {'ε':>6} | {'Loss':>8}")
-    print("-" * 62)
+          f"{'Caught/Total':>10} | {'Missed':>9} | {'FA/Normal':>10} | "
+          f"{'ε':>6} | {'Loss':>8}")
+    print("-" * 80)
 
     for ep in range(1, episodes + 1):
         obs, _ = train_env.reset()
@@ -237,12 +238,15 @@ def train(
             loss_history.append(avg_loss)
             train_env.reset_stats()
 
+            total_atk  = stats['attacks_caught'] + stats['attacks_missed']
+            total_norm = stats['total'] - total_atk
             print(
                 f"{ep:5d} | "
                 f"{stats['detection_rate']:7.1f}% | "
                 f"{stats['false_alarm_rate']:6.1f}% | "
-                f"{stats['attacks_caught']:7d} | "
-                f"{stats['attacks_missed']:7d} | "
+                f"{stats['attacks_caught']:4d}/{total_atk:<4d} | "
+                f"{stats['attacks_missed']:4d} miss | "
+                f"{stats['false_alarms']:4d}/{total_norm:<4d} FA | "
                 f"{agent.epsilon:6.3f} | "
                 f"{avg_loss:8.5f}"
             )
