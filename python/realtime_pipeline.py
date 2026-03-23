@@ -25,7 +25,7 @@ from intent_engine     import IntentEngine, Intent
 class DDQNInference:
     """Load saved DDQN model, greedy inference only."""
 
-    def __init__(self, model_path="results/ddqn_model.pth", input_dim=10,
+    def __init__(self, model_path="results/ddqn_model2.pth", input_dim=10,
                  output_dim=3):
         self.net = DDQNNetwork(input_dim, output_dim)
         ck = torch.load(model_path, map_location="cpu", weights_only=True)
@@ -153,7 +153,7 @@ class RealtimePipeline:
 
     STEP_INTERVAL = 1.0   # seconds — must match data_collector window_sec
 
-    def __init__(self, model_path="results/ddqn_model.pth"):
+    def __init__(self, model_path="results/ddqn_model2.pth"):
         self.raw_queue    = deque(maxlen=5000)
         self.extractor    = FeatureExtractor(window_sec=self.STEP_INTERVAL)
         self.dqn          = DDQNInference(model_path, input_dim=10, output_dim=3)
