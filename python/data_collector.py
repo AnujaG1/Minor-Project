@@ -105,7 +105,7 @@ def collect(output_file="results/training_data.csv",
                     if pkt_rate > 0:
                         logger.info(
                             f"t={t:.0f}s | {node:<15} | "
-                            f"rate={pkt_rate:.0f} pkt/s | "
+                            f"rate={pkt_rate:.4f} pkt/s | "
                             f"attacker={is_attacker}"
                         )
 
