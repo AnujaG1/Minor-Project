@@ -15,6 +15,7 @@ import time
 import torch
 import threading
 import numpy as np
+import socket as _socket
 from collections import deque, defaultdict
 
 from feature_extractor import FeatureExtractor, UDPReceiver
@@ -25,7 +26,7 @@ from intent_engine     import IntentEngine, Intent
 class DDQNInference:
     """Load saved DDQN model, greedy inference only."""
 
-    def __init__(self, model_path="results/ddqn_model2.pth", input_dim=10,
+    def __init__(self, model_path="results/ddqn_model.pth", input_dim=10,
                  output_dim=3):
         self.net = DDQNNetwork(input_dim, output_dim)
         ck = torch.load(model_path, map_location="cpu", weights_only=True)
@@ -153,7 +154,7 @@ class RealtimePipeline:
 
     STEP_INTERVAL = 1.0   # seconds — must match data_collector window_sec
 
-    def __init__(self, model_path="results/ddqn_model2.pth"):
+    def __init__(self, model_path="results/ddqn_model.pth"):
         self.raw_queue    = deque(maxlen=5000)
         self.extractor    = FeatureExtractor(window_sec=self.STEP_INTERVAL)
         self.dqn          = DDQNInference(model_path, input_dim=10, output_dim=3)
@@ -166,6 +167,13 @@ class RealtimePipeline:
         # IBN feedback: track which nodes are currently rate-limited or blocked
         # so we can reduce their contribution to cell_zscore accordingly
         self._mitigated: dict[str, int] = {}   # node → action applied
+
+        # Enforcement socket — sends policy commands back to OMNeT++
+        self._cmd_sock   = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+        self._omnet_host = "127.0.0.1"
+        self._omnet_cmd_port = 9998          # must match SocketStreamer.ned cmdPort
+        self._applied_policies: dict[str, int] = {}   # node → last action sent
+
 
     def start(self):
         self._listener.start()
@@ -219,6 +227,7 @@ class RealtimePipeline:
 
     def _decide_for_node(self, node: str, sim_time: float):
         features = self.extractor.get_state(node, sim_time)
+        action, confidence = self.dqn.predict_with_confidence(features)
 
         # IBN feedback: if this node is currently mitigated, reduce
         # its effective pkt_rate feature so the agent sees the effect
@@ -234,14 +243,13 @@ class RealtimePipeline:
                 features[0] *= 0.5
                 features[9] *= 0.5
 
-        action, confidence = self.dqn.predict_with_confidence(features)
-
         # Update IBN mitigation state
         if action == 0:
             self._mitigated.pop(node, None)
         else:
             self._mitigated[node] = action
 
+        self._enforce(node, action) 
         intent = self.engine.process(
             dqn_action = action,
             node       = node,
@@ -259,6 +267,23 @@ class RealtimePipeline:
                 f"{action_name} | conf={confidence:.2f} | "
                 f"rate={features[0]*2000:.0f}pkt/s"
             )
+
+    def _enforce(self, node: str, action: int):
+        """Send enforcement command to OMNeT++ SocketStreamer."""
+        last = self._applied_policies.get(node, -1)
+        if action == last:
+            return   # no change — don't spam
+
+        import json
+        cmd = json.dumps({"node": node, "action": action})
+        self._cmd_sock.sendto(
+            cmd.encode(),
+            (self._omnet_host, self._omnet_cmd_port)
+        )
+        self._applied_policies[node] = action
+
+        action_name = {0: "PASS", 1: "RATE-LIMIT", 2: "BLOCK"}[action]
+        print(f"[ENFORCE] {node} → {action_name}")
 
     def _latest_sim_time(self) -> float | None:
         latest = None

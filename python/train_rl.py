@@ -178,7 +178,7 @@ def evaluate(agent, env) -> dict:
 def train(
     csv_path   = "results/training_data.csv",
     model_path = "results/ddqn_model.pth",
-    episodes   = 800,
+    episodes   = 500,
 ):
     import pandas as pd
     from sklearn.model_selection import train_test_split

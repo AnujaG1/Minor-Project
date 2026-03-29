@@ -5,7 +5,7 @@ __pycache__/
 .venv/
 
 # Results (large files — regenerate by running simulation)
-python/results/training_data.csv
+# python/results/training_data.csv
 python/results/dqn_model.pth
 python/results/*.vec
 python/results/*.sca
