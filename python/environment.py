@@ -1,40 +1,3 @@
-"""
-environment.py  —  v2
-Gymnasium environment for DDQN training.
-
-WHY THE OLD VERSION BEHAVED LIKE IF-ELSE
-─────────────────────────────────────────
-1. action_space = Discrete(2): only pass/block. No nuance possible.
-   The agent had zero incentive to distinguish severity — blocking a slow
-   DDoS and blocking a volumetric flood gave identical reward. So it learned
-   one threshold rule for both: if pkt_rate > X → block.
-
-2. Reward = f(label match): classification signal, not mitigation signal.
-   reward = +2 if action==label else -2. This means the Q-values for
-   different actions only differ by whether they match the label — not by
-   what they do to the network. The agent learned to predict labels, not
-   to mitigate attacks.
-
-3. Random episode steps: self.current_pos = random each step.
-   The agent never saw two consecutive states from the same node.
-   It couldn't learn that a node ramping from 5→10→20 pkt/s is more
-   dangerous than one already at 20 pkt/s — because it never saw the ramp.
-
-4. 5 features from old extractor: f1..f5 were pre-computed by OMNeT++,
-   including interval which was the config param not a measured IAT.
-   The agent learned to separate config values, not traffic behaviour.
-
-WHAT IS FIXED
-─────────────
-- action_space = Discrete(3): PASS / RATE_LIMIT / BLOCK
-- Reward is QoS-based: considers attack severity, false alarm cost,
-  proportionality (rate-limiting a flood is better than doing nothing,
-  but worse than blocking it; blocking a normal UE is very costly)
-- Episodes are sequential: agent sees consecutive states per node,
-  allowing it to learn temporal patterns (ramp-up, persistence, pulsing)
-- observation_space = Box(10,): matches feature_extractor.py get_state()
-"""
-
 import numpy as np
 import pandas as pd
 import gymnasium as gym
@@ -161,22 +124,7 @@ class NetworkEnv5G(gym.Env):
 
     def _compute_reward(self, action: int, true_label: int,
                         severity: float) -> tuple[float, str]:
-        """
-        QoS-based reward. Severity ∈ [0,1] scales attack-related rewards.
-
-        Key design decisions:
-        - Missing a high-severity attack is the worst outcome (-3 at max)
-        - Blocking a legitimate UE is costly (disrupts real traffic: -1.5)
-        - Rate-limiting a legitimate UE is a smaller false alarm (-0.5)
-        - Rate-limiting an attack is always better than doing nothing,
-          but worse than blocking it (teaches proportionality)
-        - Passing normal traffic: small positive (encourages not over-blocking)
-
-        This forces the agent to learn three things:
-          1. Severity matters — not just presence/absence
-          2. Rate-limit before block for borderline cases
-          3. False alarms on heavy UEs are expensive
-        """
+    
         is_attack  = (true_label == 1)
         is_normal  = (true_label == 0)
 
@@ -192,27 +140,17 @@ class NetworkEnv5G(gym.Env):
 
         elif action == self.ACTION_RATE_LIMIT:
             if is_attack:
-                # Partial mitigation — better than pass, worse than block
-                # Reward scales with severity: high-severity attacks need blocking
                 reward  = +0.5 + 0.5 * (1.0 - severity)  # range: [+0.5, +1.0]
-                # for low severity attacker (slow DDoS): rate-limit is near-optimal
-                # for high severity attacker (flood): rate-limit is suboptimal
                 outcome = "RATELIMIT_ATTACK"
             else:
-                # False alarm — rate-limiting a normal UE degrades QoS
-                # Cost scales with UE activity (f7_flow_duration ≈ severity proxy)
                 reward  = -0.5 - 0.5 * severity   # range: [-0.5, -1.0]
                 outcome = "RATELIMIT_FALSE_ALARM"
 
         else:   # ACTION_BLOCK
             if is_attack:
-                # Best mitigation — reward scales with severity
-                # Blocking a high-severity attacker is maximally rewarded
                 reward  = +1.0 + 1.5 * severity   # range: [+1.0, +2.5]
                 outcome = "BLOCK_CORRECT"
             else:
-                # Worst outcome — blocking a legitimate UE
-                # This is more costly than missing a low-severity attack
                 reward  = -1.5
                 outcome = "BLOCK_FALSE_ALARM"
 

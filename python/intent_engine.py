@@ -1,16 +1,3 @@
-"""
-intent_engine.py
-IBN layer — translates DQN actions into structured network policy intents.
-
-Actions:
-  0 = ALLOW    → normal traffic
-  1 = THROTTLE → suspicious, rate-limit
-  2 = BLOCK    → confirmed attack, drop
-
-Confidence is computed from all 9 features, weighted by NSL-KDD importance.
-Low-confidence BLOCKs are automatically downgraded to THROTTLE.
-"""
-
 import time
 from dataclasses import dataclass, field
 from enum import Enum

@@ -11,7 +11,7 @@ python/results/*.vec
 python/results/*.sca
 
 # OMNeT++ build artifacts
-simulations/results/
+
 *.o
 *.so
 

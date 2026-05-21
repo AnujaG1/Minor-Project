@@ -1,8 +1,3 @@
-"""
-feature_extractor.py  —  v4  FINAL
-Features based ONLY on observed runtime behaviour — no static config values.
-Removes f2_pkt_size, f3_interval, f4_port_flag entirely.
-"""
 import numpy as np
 import socket, json, threading, queue, logging
 from collections import defaultdict
@@ -161,3 +156,66 @@ class UDPReceiver:
         return items
 
     def get_stats(self): return self.stats.copy()
+
+if __name__ == "__main__":
+    import time
+
+    print("="*55)
+    print("  FeatureExtractor + UDPReceiver — Live Test")
+    print("="*55)
+    print("  Listening on 127.0.0.1:9999 for OMNeT++ packets...")
+    print("  Start your OMNeT++ simulation now.")
+    print("  Press Ctrl+C to stop.\n")
+
+    receiver  = UDPReceiver(host="127.0.0.1", port=9999)
+    extractor = FeatureExtractor()
+
+    receiver.start()
+
+    try:
+        while True:
+            packets = receiver.get_data()
+
+            for raw in packets:
+                extractor.ingest(raw)
+                node  = raw.get("node", "unknown")
+                t     = float(raw.get("time", 0.0))
+                state = extractor.get_state(node, t)
+                label = extractor.get_label(node)
+
+                print(f"\n  [{t:>8.3f}s] {node:<22} label={'ATTACK' if label else 'NORMAL'}")
+                print(f"    f1  pkt_rate      = {state[0]:.4f}")
+                print(f"    f2  mean_rate     = {state[1]:.4f}")
+                print(f"    f3  burst_ratio   = {state[2]:.4f}")
+                print(f"    f4  rate_change   = {state[3]:.4f}")
+                print(f"    f5  rate_trend    = {state[4]:.4f}")
+                print(f"    f6  flow_duration = {state[5]:.4f}")
+                print(f"    f7  activity_ratio= {state[6]:.4f}")
+                print(f"    f8  cell_zscore   = {state[7]:.4f}")
+                print(f"    f9  consecutive   = {state[8]:.4f}")
+                print(f"    f10 peak_rate     = {state[9]:.4f}")
+
+            stats = receiver.get_stats()
+            if stats["sim_ended"]:
+                print("\n[INFO] SIM_END received from OMNeT++.")
+                print(f"  Packets received : {stats['packets_received']}")
+                print(f"  Packets dropped  : {stats['packets_dropped']}")
+                print(f"  Parse errors     : {stats['parse_errors']}")
+                print("  Test PASSED — pipeline is working correctly.")
+                break
+
+            time.sleep(0.1)
+
+    except KeyboardInterrupt:
+        stats = receiver.get_stats()
+        print("\n[INFO] Stopped by user.")
+        print(f"  Packets received : {stats['packets_received']}")
+        print(f"  Packets dropped  : {stats['packets_dropped']}")
+        print(f"  Parse errors     : {stats['parse_errors']}")
+        if stats['packets_received'] > 0:
+            print("  Test PASSED — packets are being received from OMNeT++.")
+        else:
+            print("  Test FAILED — no packets received. Check OMNeT++ is running and sending to 127.0.0.1:9999.")
+
+    finally:
+        receiver.stop()

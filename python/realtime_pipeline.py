@@ -321,3 +321,4 @@ if __name__ == "__main__":
     print(f"\nCounters: {snap['counters']}")
     print(f"Nodes seen: {list(snap['node_timeseries'].keys())}")
     pipeline.stop()
+
