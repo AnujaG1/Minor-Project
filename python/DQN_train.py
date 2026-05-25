@@ -12,7 +12,7 @@ import random
 import os
 from collections import deque
 
-DEVICE = torch.device("cpu")
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 EPISODES = 500
 
 
