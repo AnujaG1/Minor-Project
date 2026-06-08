@@ -1,15 +1,7 @@
 """
 train_dqn.py
 Standard DQN agent — no Dueling architecture, no Double DQN target trick.
-Uses identical hyperparameters and environment as train_rl.py (DDQN) so
-results are directly comparable.
-
-Key differences from DDQN:
-  - Single Q-network output (no Value/Advantage split)
-  - Standard DQN target: r + γ * max Q_target(s', a')   (not DDQN)
-  - No Dueling streams — one fully connected head
-
-Usage:  python3 train_dqn.py
+Comparable baseline to DDQN in train_rl.py.
 """
 
 import torch
@@ -21,9 +13,9 @@ import os
 from collections import deque
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+EPISODES = 500
 
 
-# ── Standard DQN Network (no Dueling) ────────────────────────────────────────
 class DQNNetwork(nn.Module):
     def __init__(self, input_dim=10, output_dim=3):
         super().__init__()
@@ -32,7 +24,7 @@ class DQNNetwork(nn.Module):
             nn.Linear(128, 128),       nn.ReLU(), nn.Dropout(0.2),
             nn.Linear(128, 64),        nn.ReLU(),
             nn.Linear(64, 32),         nn.ReLU(),
-            nn.Linear(32, output_dim),            # direct Q-value output
+            nn.Linear(32, output_dim),
         )
 
     def forward(self, x):
@@ -81,19 +73,23 @@ class DQNAgent:
     def act(self, state):
         if random.random() < self.epsilon:
             return random.randint(0, self.output_dim - 1)
+        self.online_net.eval()
         with torch.no_grad():
             s = torch.FloatTensor(state).unsqueeze(0).to(DEVICE)
-            return int(self.online_net(s).argmax(1).item())
+            a = int(self.online_net(s).argmax(1).item())
+        self.online_net.train()
+        return a
 
     def train_step(self):
         if len(self.buffer) < self.batch_size:
             return None
         s, a, r, ns, d = self.buffer.sample(self.batch_size)
 
+        self.online_net.train()
         q = self.online_net(s).gather(1, a.unsqueeze(1)).squeeze(1)
 
         with torch.no_grad():
-            # Standard DQN: target net picks AND evaluates the action
+            # Standard DQN: target net picks AND evaluates (no double trick)
             qt     = self.target_net(ns).max(1)[0]
             target = r + self.gamma * qt * (1 - d)
 
@@ -116,25 +112,33 @@ class DQNAgent:
             "episode":    episode,
             "stats":      stats,
         }, path)
-        print(f"  Saved → {path}")
 
 
-def evaluate(agent, env):
+def evaluate(agent, env) -> dict:
+    """
+    Walk the FULL test set sequentially from position 0.
+    Mirrors exactly what the DDQN evaluate() does in train_rl.py.
+    The original bug: env.reset() randomised current_pos each call,
+    so most evaluations landed on a slice with zero attackers → 0/0.
+    """
     agent.online_net.eval()
     saved_noise, env.noise_std = env.noise_std, 0.0
     env.reset_stats()
-    obs, _ = env.reset()
+
+    # Sequential walk from the beginning — same as DDQN
+    env.current_pos    = 0
+    env.steps_taken    = 0
+    env.episode_reward = 0.0
 
     for _ in range(len(env.states)):
+        obs = env._obs()
         with torch.no_grad():
             action = int(
                 agent.online_net(
                     torch.FloatTensor(obs).unsqueeze(0).to(DEVICE)
                 ).argmax(1).item()
             )
-        obs, _, term, trunc, _ = env.step(action)
-        if term or trunc:
-            break
+        env.step(action)
 
     stats = env.get_stats()
     env.noise_std = saved_noise
@@ -145,7 +149,7 @@ def evaluate(agent, env):
 def train(
     csv_path   = "results/training_data.csv",
     model_path = "results/dqn_model.pth",
-    episodes   = 500,
+    episodes   = EPISODES,
 ):
     import pandas as pd
     from sklearn.model_selection import train_test_split
@@ -160,8 +164,11 @@ def train(
     train_df.to_csv(train_path, index=False)
     test_df.to_csv(test_path,   index=False)
 
+    print(f"Train: {len(train_df)} rows | Test: {len(test_df)} rows")
+
+    from environment import NetworkEnv5G
     train_env = NetworkEnv5G(train_path, max_steps=300, noise_std=0.02)
-    test_env  = NetworkEnv5G(test_path,  max_steps=9999, noise_std=0.0)
+    test_env  = NetworkEnv5G(test_path,  max_steps=99999, noise_std=0.0)
     agent     = DQNAgent(input_dim=10, output_dim=3)
 
     os.makedirs("results", exist_ok=True)
@@ -197,11 +204,12 @@ def train(
             stats    = evaluate(agent, test_env)
             avg_loss = np.mean(ep_losses) if ep_losses else 0.0
             total_atk = stats['attacks_caught'] + stats['attacks_missed']
+
             print(
                 f"{ep:5d} | "
                 f"{stats['detection_rate']:7.1f}% | "
                 f"{stats['false_alarm_rate']:6.1f}% | "
-                f"{stats['attacks_caught']:4d}/{total_atk:<4d}      | "
+                f"{stats['attacks_caught']:4d}/{total_atk:<8d}| "
                 f"{agent.epsilon:6.3f} | "
                 f"{avg_loss:8.5f}"
             )
@@ -213,7 +221,10 @@ def train(
                 agent.save(model_path, ep, stats)
                 print(f"  *** New best detection rate: {best_detection:.1f}%")
 
-    print(f"\nDQN Training done. Best detection: {best_detection:.1f}%")
+    print(f"\nDQN Training done.")
+    print(f"  Best detection rate : {best_stats.get('detection_rate', 0):.2f}%")
+    print(f"  False alarm rate    : {best_stats.get('false_alarm_rate', 0):.2f}%")
+    print(f"  Accuracy            : {best_stats.get('accuracy', 0):.2f}%")
     return best_stats
 
 

@@ -1,0 +1,4 @@
+Algorithm,Detection Rate (%),False Alarm Rate (%),Accuracy (%),Attacks Caught,Total Attacks,False Alarms
+Rule-Based,98.34,11.41,81.21,178,181,34
+DQN,83.98,4.7,80.58,152,181,14
+DDQN (Dueling Double),85.64,9.06,88.31,155,181,27
